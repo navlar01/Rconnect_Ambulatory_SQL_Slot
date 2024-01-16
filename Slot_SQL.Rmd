@@ -1,0 +1,163 @@
+---
+title: "Slot_SQL"
+date: "2024-01-16"
+output: html_document
+
+---
+
+```{r}
+library(glue)
+library(odbc)
+library(tidyverse)
+library(DBI)
+library(pool)
+
+date_1 <- "2022-01-01"
+date_2 <- Sys.Date() - 2
+
+
+### Only return relevant rows from access table and return distinct rows
+raw_access_drop <- glue("DROP TABLE NEW_TEST_ACCESS_RAW_FILTERED")
+raw_access_query <- glue("CREATE TABLE NEW_TEST_ACCESS_RAW_FILTERED AS 
+SELECT d.* FROM(
+    SELECT c.*, ROW_NUMBER() OVER (PARTITION BY DEPARTMENT_ID, PROV_ID, APPT_DTTM, OVERBOOKED_YN ORDER BY DEPARTMENT_ID, PROV_ID, APPT_DTTM, OVERBOOKED_YN) AS ROW_ID 
+        FROM (
+            Select a.* FROM(
+                (SELECT * FROM( 
+                  SELECT PAT_ENC_CSN_ID, SITE AS CAMPUS, DEPARTMENT_NAME, 
+                   DEPARTMENT_ID, PROV_NAME_WID, PROV_ID, 
+                    DERIVED_STATUS_DESC AS APPT_STATUS, APPT_DTTM, 
+                    TRUNC(APPT_DTTM) AS APPT_DATE,
+                     TO_CHAR(APPT_DTTM, 'yyyy-mm') AS APPT_MONTH_YEAR,
+                     (APPT_LENGTH/60) AS APPT_LENGTH_HOURS, OVERBOOKED_YN, APPT_MADE_DTTM
+                     FROM MV_DM_PATIENT_ACCESS 
+                     WHERE APPT_DTTM BETWEEN TO_DATE('{date_1} 00:00:00', 'YYYY-MM-DD HH24:MI:SS')
+                        AND TO_DATE('{date_2} 23:59:59', 'YYYY-MM-DD HH24:MI:SS'))) a
+                INNER JOIN
+                (SELECT * FROM( 
+                SELECT DISTINCT DEPARTMENT_ID, PROV_ID, SLOT_DATE, SLOT_BEGIN_TIME FROM( 
+                  SELECT DISTINCT DEPARTMENT_NAME, DEPARTMENT_ID, PROV_NM_WID, PROV_ID,
+                   SLOT_BEGIN_TIME, SLOT_DATE, TO_CHAR(SLOT_DATE, 'yyyy-mm') AS SLOT_MONTH_YEAR, SLOT_LENGTH
+                    FROM V_AVAILABILITY 
+                     WHERE UNAVAILABLE_RSN_C IS NULL AND SLOT_DATE BETWEEN TO_DATE('{date_1} 00:00:00', 'YYYY-MM-DD HH24:MI:SS')
+                        AND TO_DATE('{date_2} 23:59:59', 'YYYY-MM-DD HH24:MI:SS')))) b
+            ON a.DEPARTMENT_ID = b.DEPARTMENT_ID AND a.PROV_ID = b.PROV_ID 
+                AND a.APPT_DTTM = b.SLOT_BEGIN_TIME
+            ) ORDER BY a.APPT_MADE_DTTM DESC
+    ) c
+)d WHERE d.ROW_ID = 1;")
+
+
+raw_access_index <- glue("CREATE index raw_access_index on NEW_TEST_ACCESS_RAW_FILTERED (CAMPUS, DEPARTMENT_ID)")
+raw_access_grant <- glue("GRANT SELECT on NEW_TEST_ACCESS_RAW_FILTERED to kweons01")
+
+NEW_TEST_ACCESS_SCHED_ARRIVED_HOURS
+
+### Create queries for summing scheudled and arrived hours
+access_sched_arived_hours_drop <- glue("DROP TABLE NEW_TEST_ACCESS_SCHED_ARRIVED_HOURS")
+access_sched_arived_hours_quary <- glue("CREATE TABLE NEW_TEST_ACCESS_SCHED_ARRIVED_HOURS AS 
+SELECT a.CAMPUS, a.DEPARTMENT_ID, a.PROV_ID, a.APPT_DATE, 
+sum(a.APPT_LENGTH_HOURS) AS SCHEDULED_HOURS, sum(b.APPT_LENGTH_HOURS) AS ARRIVED_HOURS
+FROM(
+    (SELECT * FROM NEW_TEST_ACCESS_RAW_FILTERED) a
+    LEFT JOIN
+    (SELECT * FROM NEW_TEST_ACCESS_RAW_FILTERED WHERE APPT_STATUS = 'Arrived') b
+    on a.PAT_ENC_CSN_ID = b.PAT_ENC_CSN_ID
+) GROUP BY a.CAMPUS, a.DEPARTMENT_ID, a.PROV_ID, a.APPT_DATE")
+
+access_sched_arived_hours_index <- glue("CREATE index access_sched_arived_index on NEW_TEST_ACCESS_SCHED_ARRIVED_HOURS (CAMPUS, PROV_ID, DEPARTMENT_ID)")
+access_sched_arived_hours_grant <- glue("GRANT SELECT on NEW_TEST_ACCESS_SCHED_ARRIVED_HOURS to kweons01")
+
+
+
+### Only return rows from availability that are filled slots
+availability_raw_filtered_drop <- glue("DROP TABLE NEW_TEST_AVAILABILITY_RAW_FILTERED")
+availability_raw_filtered_quary <- glue("CREATE TABLE NEW_TEST_AVAILABILITY_RAW_FILTERED AS
+SELECT a.DEPARTMENT_ID, a.PROV_NM_WID, a.PROV_ID, a.SLOT_DATE, a.SLOT_MONTH_YEAR, 
+sum(SLOT_LENGTH/60) AS AVAILABLE_HOURS
+FROM(
+    (SELECT * FROM(
+         (SELECT DISTINCT DEPARTMENT_NAME, DEPARTMENT_ID, PROV_NM_WID, PROV_ID,
+          SLOT_BEGIN_TIME, SLOT_DATE, TO_CHAR(SLOT_DATE, 'yyyy-mm') AS SLOT_MONTH_YEAR, SLOT_LENGTH
+          FROM V_AVAILABILITY 
+          WHERE UNAVAILABLE_RSN_C IS NULL AND TO_CHAR(SLOT_DATE, 'yyyy-mm')= '2023-01'))) a
+    RIGHT JOIN
+    (SELECT * FROM(
+          (SELECT DISTINCT DEPARTMENT_NAME, PROV_ID FROM NEW_TEST_ACCESS_RAW_FILTERED))) b
+    ON a.DEPARTMENT_NAME = b.DEPARTMENT_NAME AND a.PROV_ID = b.PROV_ID
+) GROUP BY a.DEPARTMENT_ID, a.PROV_NM_WID, a.PROV_ID, a.SLOT_DATE, a.SLOT_MONTH_YEAR")
+
+
+availability_raw_index <- glue("CREATE index availability_raw_index on NEW_TEST_AVAILABILITY_RAW_FILTERED ( DEPARTMENT_ID, PROV_ID)")
+availability_raw_grant <- glue("GRANT SELECT on NEW_TEST_AVAILABILITY_RAW_FILTERED to kweons01")
+
+
+### Combine all final tables and map the campus column
+slot_table_drop <- glue("DROP TABLE NEW_TEST_SLOT_TABLE")
+slot_table_quary <- glue("CREATE TABLE NEW_TEST_SLOT_TABLE AS
+SELECT e.CAMPUS, e.DEPARTMENT_ID, e.DEPARTMENT_OLD, e.CAMPUS_SPECIALTY, 
+c.PROV_ID, c.SLOT_DATE, c.SLOT_MONTH_YEAR, c.AVAILABLE_HOURS,
+c.SCHEDULED_HOURS, c.ARRIVED_HOURS FROM(
+        (SELECT a.*, b.SCHEDULED_HOURS, b.ARRIVED_HOURS
+        FROM(
+            (SELECT * FROM NEW_TEST_AVAILABILITY_RAW_FILTERED) a
+            LEFT JOIN
+            (SELECT * FROM NEW_TEST_ACCESS_SCHED_ARRIVED_HOURS) b
+            ON a.DEPARTMENT_ID = b.DEPARTMENT_ID AND a.PROV_ID = b.PROV_ID and a.SLOT_DATE = b.APPT_DATE
+        )
+    ) c
+    LEFT JOIN
+    (
+    --SELECT DISTINCT SITE AS CAMPUS, DEPT_SPECIALTY_NAME, DEPARTMENT_ID, DEPARTMENT_NAME  FROM MV_DM_PATIENT_ACCESS
+    SELECT DISTINCT CAMPUS, CAMPUS_SPECIALTY, DEPARTMENT_ID, DEPARTMENT_OLD FROM villea04.AMBULATORY_MAPPING_VIEW
+    --WHERE TO_CHAR(APPT_DTTM, 'yyyy') = '2023'
+    ) e 
+    ON c.DEPARTMENT_ID = e.DEPARTMENT_ID)")
+
+
+slot_table_index <- glue("CREATE index slot_table_index on NEW_TEST_SLOT_TABLE (CAMPUS, CAMPUS_SPECIALTY, DEPARTMENT_ID, PROV_ID)")
+slot_table_grant <- glue("GRANT SELECT on NEW_TEST_SLOT_TABLE to kweons01")
+
+
+
+## Grouped Table execution
+  tryCatch({
+        poolcon_upt <- dbConnect(drv = odbc(), "OAO Cloud DB Staging", timeout = 30)
+        dbBegin(poolcon_upt)
+            if(dbExistsTable(poolcon_upt, "NEW_TEST_ACCESS_RAW_FILTERED")){
+          dbExecute(poolcon_upt, raw_access_drop) 
+            }
+          dbExecute(poolcon_upt, raw_access_query) 
+          dbExecute(poolcon_upt, raw_access_index)
+            if(dbExistsTable(poolcon_upt, "NEW_TEST_ACCESS_SCHED_ARRIVED_HOURS")){
+          dbExecute(poolcon_upt, access_sched_arived_hours_drop) 
+            }
+          dbExecute(poolcon_upt, access_sched_arived_hours_quary) 
+          dbExecute(poolcon_upt, access_sched_arived_hours_index)
+             if(dbExistsTable(poolcon_upt, "NEW_TEST_AVAILABILITY_RAW_FILTERED")){
+          dbExecute(poolcon_upt, availability_raw_filtered_drop) 
+            }
+          dbExecute(poolcon_upt, availability_raw_filtered_quary) 
+          dbExecute(poolcon_upt, availability_raw_index)
+          
+          if(dbExistsTable(poolcon_upt, "NEW_TEST_SLOT_TABLE")){
+          dbExecute(poolcon_upt, slot_table_drop) 
+            }
+          dbExecute(poolcon_upt, slot_table_quary) 
+          dbExecute(poolcon_upt, slot_table_index)
+
+
+        
+        dbCommit(poolcon_upt)
+        dbDisconnect(poolcon_upt)
+        print("success")
+
+  },
+  error = function(err){
+    print("error staging")
+    dbRollback(poolcon_upt)
+    dbDisconnect(poolcon_upt)
+  })
+
+```
+
