@@ -12,7 +12,7 @@ library(tidyverse)
 library(DBI)
 library(pool)
 
-date_1 <- "2022-01-01"
+date_1 <- "2021-01-01"
 date_2 <- Sys.Date() %m+% months(6)
 
 
