@@ -25,7 +25,7 @@ SELECT d.* FROM(
             Select a.* FROM(
                 (SELECT * FROM( 
                   SELECT PAT_ENC_CSN_ID, SITE AS CAMPUS, DEPARTMENT_NAME, 
-                   DEPARTMENT_ID, PROV_NAME_WID, PROV_ID, 
+                   DEPARTMENT_ID, PROV_NAME_WID, PROV_ID, DEPT_SPECIALTY_NAME, NPI, VISIT_PROV_STAFF_RESOURCE_C,
                     DERIVED_STATUS_DESC AS APPT_STATUS, APPT_DTTM, 
                     TRUNC(APPT_DTTM) AS APPT_DATE,
                      TO_CHAR(APPT_DTTM, 'yyyy-mm') AS APPT_MONTH_YEAR,
@@ -52,7 +52,7 @@ raw_access_index <- glue("CREATE index raw_access_index on AMBULATORY_ACCESS_RAW
 
 
 
-### Create queries for summing scheudled and arrived hours
+### Create queries for summing scheduled and arrived hours
 access_sched_arived_hours_drop <- glue("DROP TABLE AMBULATORY_ACCESS_SCHED_ARRIVED_HOURS")
 access_sched_arived_hours_quary <- glue("CREATE TABLE AMBULATORY_ACCESS_SCHED_ARRIVED_HOURS AS 
 SELECT a.CAMPUS, a.DEPARTMENT_ID, a.PROV_ID, a.APPT_DATE, 
@@ -72,7 +72,7 @@ access_sched_arived_hours_index <- glue("CREATE index access_sched_arived_index 
 ### Only return rows from availability that are filled slots
 availability_raw_filtered_drop <- glue("DROP TABLE AMBULATORY_AVAILABILITY_RAW_FILTERED")
 availability_raw_filtered_quary <- glue("CREATE TABLE AMBULATORY_AVAILABILITY_RAW_FILTERED AS
-SELECT a.DEPARTMENT_ID, a.PROV_NM_WID, a.PROV_ID, a.SLOT_DATE, a.SLOT_MONTH_YEAR, 
+SELECT a.DEPARTMENT_ID, a.PROV_NM_WID, a.PROV_ID, a.SLOT_DATE, a.SLOT_MONTH_YEAR, b.DEPT_SPECIALTY_NAME, b.NPI, b.VISIT_PROV_STAFF_RESOURCE_C, 
 sum(SLOT_LENGTH/60) AS AVAILABLE_HOURS
 FROM(
     (SELECT * FROM(
@@ -83,9 +83,9 @@ FROM(
                         AND TO_DATE('{date_2} 23:59:59', 'YYYY-MM-DD HH24:MI:SS')))) a
     RIGHT JOIN
     (SELECT * FROM(
-          (SELECT DISTINCT DEPARTMENT_NAME, PROV_ID FROM AMBULATORY_ACCESS_RAW_FILTERED))) b
+          (SELECT DISTINCT DEPARTMENT_NAME, PROV_ID, DEPT_SPECIALTY_NAME, NPI, VISIT_PROV_STAFF_RESOURCE_C FROM AMBULATORY_ACCESS_RAW_FILTERED))) b
     ON a.DEPARTMENT_NAME = b.DEPARTMENT_NAME AND a.PROV_ID = b.PROV_ID
-) GROUP BY a.DEPARTMENT_ID, a.PROV_NM_WID, a.PROV_ID, a.SLOT_DATE, a.SLOT_MONTH_YEAR")
+) GROUP BY a.DEPARTMENT_ID, a.PROV_NM_WID, a.PROV_ID, a.SLOT_DATE, a.SLOT_MONTH_YEAR, b.DEPT_SPECIALTY_NAME, b.NPI, b.VISIT_PROV_STAFF_RESOURCE_C")
 
 
 availability_raw_index <- glue("CREATE index availability_raw_index on AMBULATORY_AVAILABILITY_RAW_FILTERED (SLOT_DATE, DEPARTMENT_ID)")
@@ -99,7 +99,8 @@ slot_table_quary <- glue("CREATE TABLE AMBULATORY_SLOT_TABLE AS
                             j.PRIVATE_HOURS, k.OVERBOOKED_HOURS
                             FROM
                             (
-                              SELECT e.CAMPUS, e.DEPARTMENT_ID, e.DEPARTMENT, e.CAMPUS_SPECIALTY, 
+                              SELECT e.CAMPUS, e.DEPARTMENT_ID, e.DEPARTMENT, e.CAMPUS_SPECIALTY, c.DEPT_SPECIALTY_NAME, c.NPI,  
+                              c.VISIT_PROV_STAFF_RESOURCE_C, 
                               c.PROV_ID, TRIM(TRAILING FROM REGEXP_REPLACE(PROV_NM_WID, '\\[(.*?)\\]', '')) AS Provider, 
                               c.SLOT_DATE, c.SLOT_MONTH_YEAR, SLOT_DATE - (TO_CHAR(SLOT_DATE, 'D') - 1) AS APPT_WEEK, 
                               c.AVAILABLE_HOURS, c.SCHEDULED_HOURS, c.ARRIVED_HOURS, TO_CHAR(c.SLOT_DATE, 'DY') AS APPT_DAY 
@@ -177,7 +178,6 @@ slot_table_quary <- glue("CREATE TABLE AMBULATORY_SLOT_TABLE AS
 slot_table_index <- glue("CREATE index slot_table_index on AMBULATORY_SLOT_TABLE (SLOT_DATE, DEPARTMENT_ID, CAMPUS)")
 
 poolcon_upt <- dbConnect(odbc(), "OAO Cloud DB Staging", timeout = 15)
-
 
 
 ## Grouped Table execution
