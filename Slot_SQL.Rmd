@@ -15,6 +15,11 @@ library(pool)
 date_1 <- "2021-01-01"
 date_2 <- Sys.Date() %m+% months(6)
 
+#MApping for V_AVAILABILITY
+slot_mapping_drop <- glue("DROP TABLE AMBULATORY_SLOT_MAPPING")
+slot_mapping <- glue("CREATE TABLE AMBULATORY_SLOT_MAPPING AS 
+                     SELECT DISTINCT CAMPUS, CAMPUS_SPECIALTY, DEPARTMENT_ID, DEPARTMENT FROM MV_DM_PATIENT_ACCESS")
+
 
 ### Only return relevant rows from access table and return distinct rows
 raw_access_drop <- glue("DROP TABLE AMBULATORY_ACCESS_RAW_FILTERED")
@@ -120,7 +125,7 @@ slot_table_quary <- glue("CREATE TABLE AMBULATORY_SLOT_TABLE AS
                               LEFT JOIN
                               (
                                 SELECT DISTINCT CAMPUS, CAMPUS_SPECIALTY, DEPARTMENT_ID, DEPARTMENT 
-                                FROM villea04.AMBULATORY_MAPPING_VIEW
+                                FROM AMBULATORY_SLOT_MAPPING
                               ) e 
                               ON c.DEPARTMENT_ID = e.DEPARTMENT_ID
                             ) f
@@ -184,6 +189,10 @@ poolcon_upt <- dbConnect(odbc(), "OAO Cloud DB Staging", timeout = 15)
   tryCatch({
         poolcon_upt <- dbConnect(drv = odbc(), "OAO Cloud DB Staging", timeout = 30)
         dbBegin(poolcon_upt)
+              if(dbExistsTable(poolcon_upt, "AMBULATORY_SLOT_MAPPING")){
+          dbExecute(poolcon_upt, slot_mapping_drop) 
+              }
+          dbExecute(poolcon_upt, slot_mapping) 
             if(dbExistsTable(poolcon_upt, "AMBULATORY_ACCESS_RAW_FILTERED")){
           dbExecute(poolcon_upt, raw_access_drop) 
             }
