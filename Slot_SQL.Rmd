@@ -18,7 +18,7 @@ date_2 <- Sys.Date() %m+% months(6)
 #MApping for V_AVAILABILITY
 slot_mapping_drop <- glue("DROP TABLE AMBULATORY_SLOT_MAPPING")
 slot_mapping <- glue("CREATE TABLE AMBULATORY_SLOT_MAPPING AS 
-                     SELECT DISTINCT CAMPUS, CAMPUS_SPECIALTY, DEPARTMENT_ID, DEPARTMENT FROM MV_DM_PATIENT_ACCESS")
+                     SELECT DISTINCT CAMPUS, CAMPUS_SPECIALTY, DEPARTMENT_ID, DEPARTMENT_NAME AS DEPARTMENT FROM MV_DM_PATIENT_ACCESS")
 
 
 ### Only return relevant rows from access table and return distinct rows
