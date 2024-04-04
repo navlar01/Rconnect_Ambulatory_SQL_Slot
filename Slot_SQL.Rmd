@@ -20,21 +20,38 @@ slot_mapping_drop <- glue("DROP TABLE AMBULATORY_SLOT_MAPPING")
 slot_mapping <- glue("CREATE TABLE AMBULATORY_SLOT_MAPPING AS 
                      SELECT DISTINCT DEP_RPT_GRP_SEVENTEEN  AS CAMPUS, DEPT_SPECIALTY_NAME AS CAMPUS_SPECIALTY, DEPARTMENT_ID, DEPARTMENT_NAME AS DEPARTMENT FROM MV_DM_PATIENT_ACCESS")
 
+###Creating joined v_availability and block tables
+avail_block_combined_drop <- glue("DROP TABLE AVAILABILITY_BLOCK_COMBINED")
+avail_block_combined_query <- glue("CREATE TABLE AVAILABILITY_BLOCK_COMBINED AS
+SELECT DISTINCT av.DEPARTMENT_ID, av.DEPARTMENT_NAME, av.PROV_ID,av.PROV_NM_WID, av.SLOT_DATE, av.SLOT_BEGIN_TIME, av.SLOT_LENGTH, av.UNAVAILABLE_RSN_C, av.TIME_HELD_YN, av.PRIVATE_YN, av.ORG_OVBK_OPENINGS,zb1.NAME AS BLOCK_NAME, zb2.NAME AS ORG_BLOCK_NAME
+FROM V_AVAILABILITY av
+LEFT JOIN AVAIL_BLOCK ab ON av.DEPARTMENT_ID = ab.DEPARTMENT_ID 
+    AND av.PROV_ID = ab.PROV_ID 
+    AND av.SLOT_BEGIN_TIME = ab.SLOT_BEGIN_TIME
+LEFT JOIN ZC_APPT_BLOCK zb1 ON ab.BLOCK_C = zb1.APPT_BLOCK_C
+LEFT JOIN ZC_APPT_BLOCK zb2 ON ab.REL_BLOCK_C = zb2.APPT_BLOCK_C
+WHERE av.UNAVAILABLE_RSN_C IS NULL 
+    AND av.SLOT_DATE BETWEEN TO_DATE('{date_1} 00:00:00', 'YYYY-MM-DD HH24:MI:SS')
+    AND TO_DATE('{date_2} 23:59:59', 'YYYY-MM-DD HH24:MI:SS')
+;")
+
+avail_block_index <- glue("CREATE INDEX avail_block_index on AVAILABILITY_BLOCK_COMBINED (SLOT_DATE, DEPARTMENT_ID)")
 
 ### Only return relevant rows from access table and return distinct rows
 raw_access_drop <- glue("DROP TABLE AMBULATORY_ACCESS_RAW_FILTERED")
-raw_access_query <- glue("CREATE TABLE AMBULATORY_ACCESS_RAW_FILTERED AS 
+aw_access_query <- glue("CREATE TABLE AMBULATORY_ACCESS_RAW_FILTERED AS 
 SELECT d.* FROM(
-    SELECT c.*, ROW_NUMBER() OVER (PARTITION BY DEPARTMENT_ID, PROV_ID, APPT_DTTM, OVERBOOKED_YN ORDER BY DEPARTMENT_ID, PROV_ID, APPT_DTTM, OVERBOOKED_YN) AS ROW_ID 
+    SELECT c.*, ROW_NUMBER() OVER (PARTITION BY DEPARTMENT_ID, PROV_ID, APPT_DTTM, OVERBOOKED_YN ORDER BY DEPARTMENT_ID, PROV_ID, APPT_DTTM,               OVERBOOKED_YN) AS ROW_ID 
         FROM (
-            Select a.* FROM(
+            Select a.*, b.SLOT_DATE, b.SLOT_BEGIN_TIME, b.SLOT_LENGTH, b.UNAVAILABLE_RSN_C, b.TIME_HELD_YN, b.PRIVATE_YN, b.ORG_OVBK_OPENINGS,                            b.BLOCK_NAME, b.ORG_BLOCK_NAME
+            FROM(
                 (SELECT * FROM( 
                   SELECT PAT_ENC_CSN_ID, SITE AS CAMPUS, DEPARTMENT_NAME, 
                    DEPARTMENT_ID, PROV_NAME_WID, PROV_ID, DEPT_SPECIALTY_NAME, NPI, VISIT_PROV_STAFF_RESOURCE_C,
                     DERIVED_STATUS_DESC AS APPT_STATUS, APPT_DTTM, 
                     TRUNC(APPT_DTTM) AS APPT_DATE,
                      TO_CHAR(APPT_DTTM, 'yyyy-mm') AS APPT_MONTH_YEAR,
-                     (APPT_LENGTH/60) AS APPT_LENGTH_HOURS, OVERBOOKED_YN, APPT_MADE_DTTM, APPT_CANC_DTTM
+                     (APPT_LENGTH) AS APPT_LENGTH_MINS, OVERBOOKED_YN, APPT_MADE_DTTM, APPT_CANC_DTTM
                      FROM MV_DM_PATIENT_ACCESS 
                      WHERE APPT_DTTM BETWEEN TO_DATE('{date_1} 00:00:00', 'YYYY-MM-DD HH24:MI:SS')
                         AND TO_DATE('{date_2} 23:59:59', 'YYYY-MM-DD HH24:MI:SS'))) a
@@ -42,8 +59,8 @@ SELECT d.* FROM(
                 (SELECT * FROM( 
                 SELECT DISTINCT DEPARTMENT_ID, PROV_ID, SLOT_DATE, SLOT_BEGIN_TIME FROM( 
                   SELECT DISTINCT DEPARTMENT_NAME, DEPARTMENT_ID, PROV_NM_WID, PROV_ID,
-                   SLOT_BEGIN_TIME, SLOT_DATE, TO_CHAR(SLOT_DATE, 'yyyy-mm') AS SLOT_MONTH_YEAR, SLOT_LENGTH
-                    FROM V_AVAILABILITY 
+                   SLOT_BEGIN_TIME, SLOT_DATE, TO_CHAR(SLOT_DATE, 'yyyy-mm') AS SLOT_MONTH_YEAR, SLOT_LENGTH, BLOCK_NAME, ORG_BLOCK_NAME
+                    FROM AVAILABILITY_BLOCK_COMBINED 
                      WHERE UNAVAILABLE_RSN_C IS NULL AND SLOT_DATE BETWEEN TO_DATE('{date_1} 00:00:00', 'YYYY-MM-DD HH24:MI:SS')
                         AND TO_DATE('{date_2} 23:59:59', 'YYYY-MM-DD HH24:MI:SS')))) b
             ON a.DEPARTMENT_ID = b.DEPARTMENT_ID AND a.PROV_ID = b.PROV_ID 
@@ -60,15 +77,15 @@ raw_access_index <- glue("CREATE index raw_access_index on AMBULATORY_ACCESS_RAW
 ### Create queries for summing scheduled and arrived hours
 access_sched_arived_hours_drop <- glue("DROP TABLE AMBULATORY_ACCESS_SCHED_ARRIVED_HOURS")
 access_sched_arived_hours_quary <- glue("CREATE TABLE AMBULATORY_ACCESS_SCHED_ARRIVED_HOURS AS 
-SELECT a.CAMPUS, a.DEPARTMENT_ID, a.PROV_ID, a.APPT_DATE, 
-sum(a.APPT_LENGTH_HOURS) AS SCHEDULED_HOURS, sum(b.APPT_LENGTH_HOURS) AS ARRIVED_HOURS
+SELECT a.CAMPUS, a.DEPARTMENT_ID, a.PROV_ID, a.APPT_DATE, a.BLOCK_NAME, a.ORG_BLOCK_NAME,
+sum(a.APPT_LENGTH_MINS) AS SCHEDULED_HOURS, sum(b.APPT_LENGTH_MINS) AS ARRIVED_HOURS
 FROM(
-    (SELECT * FROM AMBULATORY_ACCESS_RAW_FILTERED WHERE (APPT_STATUS IN ('Arrived', 'No Show',       'Scheduled')) OR 
+    (SELECT * FROM AMBULATORY_ACCESS_RAW_FILTERED WHERE (APPT_STATUS IN ('Arrived', 'No Show', 'Scheduled')) OR 
     (APPT_STATUS IN  ('Canceled', 'Rescheduled', 'Bumped') AND TO_CHAR(APPT_DTTM, 'YYYY-MM-DD') = TO_CHAR(APPT_CANC_DTTM, 'YYYY-MM-DD'))) a
     LEFT JOIN
     (SELECT * FROM AMBULATORY_ACCESS_RAW_FILTERED WHERE APPT_STATUS = 'Arrived') b
     on a.PAT_ENC_CSN_ID = b.PAT_ENC_CSN_ID
-) GROUP BY a.CAMPUS, a.DEPARTMENT_ID, a.PROV_ID, a.APPT_DATE")
+) GROUP BY a.CAMPUS, a.DEPARTMENT_ID, a.PROV_ID, a.APPT_DATE, a.BLOCK_NAME, a.ORG_BLOCK_NAME")
 
 access_sched_arived_hours_index <- glue("CREATE index access_sched_arived_index on AMBULATORY_ACCESS_SCHED_ARRIVED_HOURS (APPT_DATE, DEPARTMENT_ID, CAMPUS)")
 
@@ -77,20 +94,20 @@ access_sched_arived_hours_index <- glue("CREATE index access_sched_arived_index 
 ### Only return rows from availability that are filled slots
 availability_raw_filtered_drop <- glue("DROP TABLE AMBULATORY_AVAILABILITY_RAW_FILTERED")
 availability_raw_filtered_quary <- glue("CREATE TABLE AMBULATORY_AVAILABILITY_RAW_FILTERED AS
-SELECT a.DEPARTMENT_ID, a.PROV_NM_WID, a.PROV_ID, a.SLOT_DATE, a.SLOT_MONTH_YEAR, b.DEPT_SPECIALTY_NAME, b.NPI, b.VISIT_PROV_STAFF_RESOURCE_C, 
-sum(SLOT_LENGTH/60) AS AVAILABLE_HOURS
+SELECT a.DEPARTMENT_ID, a.PROV_NM_WID, a.PROV_ID, a.SLOT_DATE, a.SLOT_MONTH_YEAR, a.BLOCK_NAME, a.ORG_BLOCK_NAME, b.DEPT_SPECIALTY_NAME, b.NPI, b.VISIT_PROV_STAFF_RESOURCE_C, 
+sum(SLOT_LENGTH) AS AVAILABLE_MINS
 FROM(
     (SELECT * FROM(
          (SELECT DISTINCT DEPARTMENT_NAME, DEPARTMENT_ID, PROV_NM_WID, PROV_ID,
-          SLOT_BEGIN_TIME, SLOT_DATE, TO_CHAR(SLOT_DATE, 'yyyy-mm') AS SLOT_MONTH_YEAR, SLOT_LENGTH
-          FROM V_AVAILABILITY 
+          SLOT_BEGIN_TIME, SLOT_DATE, TO_CHAR(SLOT_DATE, 'yyyy-mm') AS SLOT_MONTH_YEAR, SLOT_LENGTH, BLOCK_NAME, ORG_BLOCK_NAME
+          FROM AVAILABILITY_BLOCK_COMBINED
           WHERE UNAVAILABLE_RSN_C IS NULL AND SLOT_DATE BETWEEN TO_DATE('{date_1} 00:00:00', 'YYYY-MM-DD HH24:MI:SS')
                         AND TO_DATE('{date_2} 23:59:59', 'YYYY-MM-DD HH24:MI:SS')))) a
     RIGHT JOIN
     (SELECT * FROM(
           (SELECT DISTINCT DEPARTMENT_NAME, PROV_ID, DEPT_SPECIALTY_NAME, NPI, VISIT_PROV_STAFF_RESOURCE_C FROM AMBULATORY_ACCESS_RAW_FILTERED))) b
     ON a.DEPARTMENT_NAME = b.DEPARTMENT_NAME AND a.PROV_ID = b.PROV_ID
-) GROUP BY a.DEPARTMENT_ID, a.PROV_NM_WID, a.PROV_ID, a.SLOT_DATE, a.SLOT_MONTH_YEAR, b.DEPT_SPECIALTY_NAME, b.NPI, b.VISIT_PROV_STAFF_RESOURCE_C")
+) GROUP BY a.DEPARTMENT_ID, a.PROV_NM_WID, a.PROV_ID, a.SLOT_DATE, a.SLOT_MONTH_YEAR, a.BLOCK_NAME, a.ORG_BLOCK_NAME, b.DEPT_SPECIALTY_NAME, b.NPI, b.VISIT_PROV_STAFF_RESOURCE_C")
 
 
 availability_raw_index <- glue("CREATE index availability_raw_index on AMBULATORY_AVAILABILITY_RAW_FILTERED (SLOT_DATE, DEPARTMENT_ID)")
@@ -106,8 +123,9 @@ slot_table_quary <- glue("CREATE TABLE AMBULATORY_SLOT_TABLE AS
                             (
                               SELECT e.CAMPUS, e.DEPARTMENT_ID, e.DEPARTMENT, e.CAMPUS_SPECIALTY, c.DEPT_SPECIALTY_NAME, c.NPI,  
                               c.VISIT_PROV_STAFF_RESOURCE_C, 
-                              c.PROV_ID, TRIM(TRAILING FROM REGEXP_REPLACE(PROV_NM_WID, '\\[(.*?)\\]', '')) AS Provider, 
-                              c.SLOT_DATE, c.SLOT_MONTH_YEAR, SLOT_DATE - (TO_CHAR(SLOT_DATE, 'D') - 1) AS APPT_WEEK, 
+                              c.PROV_ID, TRIM(TRAILING FROM REGEXP_REPLACE(PROV_NM_WID, '\\[(.*?)\\]', '')) AS Provider,
+                              c.SLOT_DATE, c.SLOT_MONTH_YEAR, c.BLOCK_NAME, c.ORG_BLOCK_NAME,
+                              SLOT_DATE - (TO_CHAR(SLOT_DATE, 'D') - 1) AS APPT_WEEK, 
                               c.AVAILABLE_HOURS, c.SCHEDULED_HOURS, c.ARRIVED_HOURS, TO_CHAR(c.SLOT_DATE, 'DY') AS APPT_DAY 
                               FROM
                               (
@@ -133,49 +151,49 @@ slot_table_quary <- glue("CREATE TABLE AMBULATORY_SLOT_TABLE AS
                             villea04.holidays g  ON f.SLOT_DATE = g.dates
                             LEFT JOIN
                             (
-                              SELECT DEPARTMENT_ID, PROV_ID, SLOT_DATE, 
-                              SUM(SLOT_LENGTH/60) AS UNAVAILABLE_HOURS
-                              FROM V_AVAILABILITY 
+                              SELECT DEPARTMENT_ID, PROV_ID, SLOT_DATE, BLOCK_NAME, ORG_BLOCK_NAME,
+                              SUM(SLOT_LENGTH) AS UNAVAILABLE_MINS
+                              FROM AVAILABILITY_BLOCK_COMBINED 
                               WHERE UNAVAILABLE_RSN_C IS NOT NULL 
                               AND SLOT_DATE BETWEEN TO_DATE('{date_1} 00:00:00', 'YYYY-MM-DD HH24:MI:SS') 
                               AND TO_DATE('{date_2} 23:59:59', 'YYYY-MM-DD HH24:MI:SS')
-                              GROUP BY DEPARTMENT_ID, PROV_ID, SLOT_DATE
+                              GROUP BY DEPARTMENT_ID, PROV_ID, SLOT_DATE, BLOCK_NAME, ORG_BLOCK_NAME
                             ) h
                             ON f.DEPARTMENT_ID = h.DEPARTMENT_ID AND f.PROV_ID = h.PROV_ID AND f.SLOT_DATE = h.SLOT_DATE
                             LEFT JOIN
                             (
-                              SELECT DEPARTMENT_ID, PROV_ID, SLOT_DATE, 
-                              SUM(SLOT_LENGTH/60) AS HELD_HOURS
-                              FROM V_AVAILABILITY 
+                              SELECT DEPARTMENT_ID, PROV_ID, SLOT_DATE, BLOCK_NAME, ORG_BLOCK_NAME,
+                              SUM(SLOT_LENGTH) AS HELD_MINS
+                              FROM AVAILABILITY_BLOCK_COMBINED  
                               WHERE UNAVAILABLE_RSN_C IS NULL 
                               AND TIME_HELD_YN = 'Y'
                               AND SLOT_DATE BETWEEN TO_DATE('{date_1} 00:00:00', 'YYYY-MM-DD HH24:MI:SS') 
                               AND TO_DATE('{date_2} 23:59:59', 'YYYY-MM-DD HH24:MI:SS')
-                              GROUP BY DEPARTMENT_ID, PROV_ID, SLOT_DATE
+                              GROUP BY DEPARTMENT_ID, PROV_ID, SLOT_DATE, BLOCK_NAME, ORG_BLOCK_NAME
                             ) i
                             ON f.DEPARTMENT_ID = i.DEPARTMENT_ID AND f.PROV_ID = i.PROV_ID AND f.SLOT_DATE = i.SLOT_DATE
                             LEFT JOIN
                             (
-                              SELECT DEPARTMENT_ID, PROV_ID, SLOT_DATE, 
-                              SUM(SLOT_LENGTH/60) AS PRIVATE_HOURS
-                              FROM V_AVAILABILITY 
+                              SELECT DEPARTMENT_ID, PROV_ID, SLOT_DATE, BLOCK_NAME, ORG_BLOCK_NAME,
+                              SUM(SLOT_LENGTH) AS PRIVATE_MINS
+                              FROM AVAILABILITY_BLOCK_COMBINED 
                               WHERE UNAVAILABLE_RSN_C IS NULL 
                               AND PRIVATE_YN = 'Y'
                               AND SLOT_DATE BETWEEN TO_DATE('{date_1} 00:00:00', 'YYYY-MM-DD HH24:MI:SS') 
                               AND TO_DATE('{date_2} 23:59:59', 'YYYY-MM-DD HH24:MI:SS')
-                              GROUP BY DEPARTMENT_ID, PROV_ID, SLOT_DATE
+                              GROUP BY DEPARTMENT_ID, PROV_ID, SLOT_DATE, BLOCK_NAME, ORG_BLOCK_NAME
                             ) j
                             ON f.DEPARTMENT_ID = j.DEPARTMENT_ID AND f.PROV_ID = j.PROV_ID AND f.SLOT_DATE = j.SLOT_DATE
                             LEFT JOIN
                             (
-                              SELECT DEPARTMENT_ID, PROV_ID, SLOT_DATE, 
-                              SUM(SLOT_LENGTH/60) AS OVERBOOKED_HOURS
-                              FROM V_AVAILABILITY 
+                              SELECT DEPARTMENT_ID, PROV_ID, SLOT_DATE, BLOCK_NAME, ORG_BLOCK_NAME,
+                              SUM(SLOT_LENGTH) AS OVERBOOKED_MINS
+                              FROM AVAILABILITY_BLOCK_COMBINED 
                               WHERE UNAVAILABLE_RSN_C IS NULL 
                               AND ORG_OVBK_OPENINGS > 0
                               AND SLOT_DATE BETWEEN TO_DATE('{date_1} 00:00:00', 'YYYY-MM-DD HH24:MI:SS') 
                               AND TO_DATE('{date_2} 23:59:59', 'YYYY-MM-DD HH24:MI:SS')
-                              GROUP BY DEPARTMENT_ID, PROV_ID, SLOT_DATE
+                              GROUP BY DEPARTMENT_ID, PROV_ID, SLOT_DATE, BLOCK_NAME, ORG_BLOCK_NAME
                             ) k
                             ON f.DEPARTMENT_ID = k.DEPARTMENT_ID AND f.PROV_ID = k.PROV_ID AND f.SLOT_DATE = k.SLOT_DATE
                             ")
@@ -195,6 +213,11 @@ poolcon_upt <- dbConnect(odbc(), "OAO Cloud DB Staging", timeout = 15)
           dbExecute(poolcon_upt, slot_mapping) 
             if(dbExistsTable(poolcon_upt, "AMBULATORY_ACCESS_RAW_FILTERED")){
           dbExecute(poolcon_upt, raw_access_drop) 
+            }
+          dbExecute(poolcon_upt, avail_block_combined_query) 
+          dbExecute(poolcon_upt, avail_block_index)
+            if(dbExistsTable(poolcon_upt, "AVAILABILITY_BLOCK_COMBINED")){
+          dbExecute(poolcon_upt, avail_block_combined_drop) 
             }
           dbExecute(poolcon_upt, raw_access_query) 
           dbExecute(poolcon_upt, raw_access_index)
