@@ -113,7 +113,7 @@ base_slot_block_index <- glue("CREATE index base_slot_block_index on AMBULATORY_
 ### Only return rows from availability that are filled slots
 availability_raw_filtered_drop <- glue("DROP TABLE AMBULATORY_AVAILABILITY_RAW_FILTERED")
 availability_raw_filtered_quary <- glue("CREATE TABLE AMBULATORY_AVAILABILITY_RAW_FILTERED AS
-SELECT a.DEPARTMENT_ID, a.PROV_NM_WID, a.PROV_ID, a.SLOT_DATE, a.SLOT_MONTH_YEAR, a.BLOCK_NAME, a.ORG_BLOCK_NAME, b.DEPT_SPECIALTY_NAME, b.NPI, b.VISIT_PROV_STAFF_RESOURCE_C, 
+SELECT a.DEPARTMENT_ID, a.DEPARTMENT_NAME, a.PROV_NM_WID, a.PROV_ID, a.SLOT_DATE, a.SLOT_MONTH_YEAR, a.BLOCK_NAME, a.ORG_BLOCK_NAME, b.DEPT_SPECIALTY_NAME, b.NPI, b.VISIT_PROV_STAFF_RESOURCE_C, 
 sum(SLOT_LENGTH) AS AVAILABLE_MINS
 FROM(
     (SELECT * FROM(
@@ -126,7 +126,7 @@ FROM(
     (SELECT * FROM(
           (SELECT DISTINCT DEPARTMENT_NAME, PROV_ID, DEPT_SPECIALTY_NAME, NPI, VISIT_PROV_STAFF_RESOURCE_C FROM AMBULATORY_ACCESS_RAW_FILTERED))) b
     ON a.DEPARTMENT_NAME = b.DEPARTMENT_NAME AND a.PROV_ID = b.PROV_ID
-) GROUP BY a.DEPARTMENT_ID, a.PROV_NM_WID, a.PROV_ID, a.SLOT_DATE, a.SLOT_MONTH_YEAR, a.BLOCK_NAME, a.ORG_BLOCK_NAME, b.DEPT_SPECIALTY_NAME, b.NPI, b.VISIT_PROV_STAFF_RESOURCE_C")
+) GROUP BY a.DEPARTMENT_ID, a.DEPARTMENT_NAME, a.PROV_NM_WID, a.PROV_ID, a.SLOT_DATE, a.SLOT_MONTH_YEAR, a.BLOCK_NAME, a.ORG_BLOCK_NAME, b.DEPT_SPECIALTY_NAME, b.NPI, b.VISIT_PROV_STAFF_RESOURCE_C")
 
 
 availability_raw_index <- glue("CREATE index availability_raw_index on AMBULATORY_AVAILABILITY_RAW_FILTERED (SLOT_DATE, DEPARTMENT_ID)")
@@ -140,7 +140,7 @@ slot_block_table_quary <- glue("CREATE TABLE AMBULATORY_SLOT_BLOCK_TABLE AS
                             j.PRIVATE_MINS, k.OVERBOOKED_MINS
                             FROM
                             (
-                              SELECT e.CAMPUS, e.DEPARTMENT_ID, e.DEPARTMENT, e.CAMPUS_SPECIALTY, c.DEPT_SPECIALTY_NAME, c.NPI,  
+                              SELECT e.CAMPUS, e.DEPARTMENT_ID, e.DEPARTMENT, e.CAMPUS_SPECIALTY, e.DEPT_SPECIALTY_NAME, c.NPI,  
                               c.VISIT_PROV_STAFF_RESOURCE_C, 
                               c.PROV_ID, TRIM(TRAILING FROM REGEXP_REPLACE(PROV_NM_WID, '\\[(.*?)\\]', '')) AS Provider,
                               c.SLOT_DATE, c.SLOT_MONTH_YEAR, c.BLOCK_NAME, c.ORG_BLOCK_NAME,
@@ -148,7 +148,7 @@ slot_block_table_quary <- glue("CREATE TABLE AMBULATORY_SLOT_BLOCK_TABLE AS
                               c.AVAILABLE_MINS, c.SCHEDULED_MINS, c.ARRIVED_MINS, TO_CHAR(c.SLOT_DATE, 'DY') AS APPT_DAY 
                               FROM
                               (
-                                SELECT s.*, b.DEPT_SPECIALTY_NAME, b.SCHEDULED_MINS, b.ARRIVED_MINS
+                                SELECT s.*, b.SCHEDULED_MINS, b.ARRIVED_MINS
                                 FROM
                                 (SELECT r.*, a.AVAILABLE_MINS
                                 FROM
@@ -170,11 +170,11 @@ slot_block_table_quary <- glue("CREATE TABLE AMBULATORY_SLOT_BLOCK_TABLE AS
                                 (
                                   SELECT * FROM AMBULATORY_ACCESS_SCHED_ARRIVED_HOURS
                                 ) b
-                                ON a.DEPARTMENT_ID = b.DEPARTMENT_ID AND a.PROV_ID = b.PROV_ID AND a.SLOT_DATE = b.APPT_DATE
+                                ON s.DEPARTMENT_ID = b.DEPARTMENT_ID AND s.PROV_ID = b.PROV_ID AND s.SLOT_DATE = b.APPT_DATE
                               ) c
                               LEFT JOIN
                               (
-                                SELECT DISTINCT CAMPUS, CAMPUS_SPECIALTY, DEPARTMENT_ID, DEPARTMENT 
+                                SELECT DISTINCT CAMPUS, CAMPUS_SPECIALTY, DEPARTMENT_ID, DEPARTMENT, CAMPUS_SPECIALTY AS DEPT_SPECIALTY_NAME 
                                 FROM AMBULATORY_SLOT_MAPPING
                               ) e 
                               ON c.DEPARTMENT_ID = e.DEPARTMENT_ID
@@ -237,37 +237,37 @@ slot_block_table_index <- glue("CREATE index slot_block_table_index on AMBULATOR
   tryCatch({
         poolcon_upt <- dbConnect(drv = odbc(), "OAO Cloud DB Staging", timeout = 30)
         dbBegin(poolcon_upt)
- #             if(dbExistsTable(poolcon_upt, "AMBULATORY_SLOT_MAPPING")){
-#          dbExecute(poolcon_upt, slot_mapping_drop) 
-#              }
-#          dbExecute(poolcon_upt, slot_mapping) 
+             if(dbExistsTable(poolcon_upt, "AMBULATORY_SLOT_MAPPING")){
+          dbExecute(poolcon_upt, slot_mapping_drop) 
+              }
+          dbExecute(poolcon_upt, slot_mapping) 
            if(dbExistsTable(poolcon_upt, "AVAILABILITY_BLOCK_COMBINED")){
           dbExecute(poolcon_upt, avail_block_combined_drop) 
             }
           dbExecute(poolcon_upt, avail_block_combined_query) 
           dbExecute(poolcon_upt, avail_block_index)
-#            if(dbExistsTable(poolcon_upt, "AMBULATORY_ACCESS_RAW_FILTERED")){
-#          dbExecute(poolcon_upt, raw_access_drop) 
-#            }
-#          dbExecute(poolcon_upt, raw_access_query) 
-#          dbExecute(poolcon_upt, raw_access_index)
-#            if(dbExistsTable(poolcon_upt, "AMBULATORY_ACCESS_SCHED_ARRIVED_HOURS")){
-#          dbExecute(poolcon_upt, access_sched_arived_hours_drop) 
-#            }
-#          dbExecute(poolcon_upt, access_sched_arived_hours_quary) 
-#          dbExecute(poolcon_upt, access_sched_arived_hours_index)
-#          if(dbExistsTable(poolcon_upt, "AMBULATORY_BASE_SLOT_BLOCK_TABLE")){
-#          dbExecute(poolcon_upt, base_slot_block_drop) 
-#            }
-#          dbExecute(poolcon_upt, base_slot_block_query) 
-#          dbExecute(poolcon_upt, base_slot_block_index)
+            if(dbExistsTable(poolcon_upt, "AMBULATORY_ACCESS_RAW_FILTERED")){
+          dbExecute(poolcon_upt, raw_access_drop) 
+            }
+          dbExecute(poolcon_upt, raw_access_query) 
+          dbExecute(poolcon_upt, raw_access_index)
+            if(dbExistsTable(poolcon_upt, "AMBULATORY_ACCESS_SCHED_ARRIVED_HOURS")){
+          dbExecute(poolcon_upt, access_sched_arived_hours_drop) 
+            }
+          dbExecute(poolcon_upt, access_sched_arived_hours_quary) 
+          dbExecute(poolcon_upt, access_sched_arived_hours_index)
+          if(dbExistsTable(poolcon_upt, "AMBULATORY_BASE_SLOT_BLOCK_TABLE")){
+          dbExecute(poolcon_upt, base_slot_block_drop) 
+            }
+          dbExecute(poolcon_upt, base_slot_block_query) 
+          dbExecute(poolcon_upt, base_slot_block_index)
              if(dbExistsTable(poolcon_upt, "AMBULATORY_AVAILABILITY_RAW_FILTERED")){
           dbExecute(poolcon_upt, availability_raw_filtered_drop) 
             }
           dbExecute(poolcon_upt, availability_raw_filtered_quary) 
           dbExecute(poolcon_upt, availability_raw_index)
           
-          if(dbExistsTable(poolcon_upt, "AMBULATORY_SLOT_BLOCK_TABLE")){
+         if(dbExistsTable(poolcon_upt, "AMBULATORY_SLOT_BLOCK_TABLE")){
           dbExecute(poolcon_upt, slot_block_table_drop) 
             }
           dbExecute(poolcon_upt, slot_block_table_quary) 
